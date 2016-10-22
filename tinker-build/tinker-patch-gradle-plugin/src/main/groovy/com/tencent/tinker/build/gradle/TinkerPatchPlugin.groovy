@@ -16,23 +16,15 @@
 
 package com.tencent.tinker.build.gradle
 
-import com.tencent.tinker.build.gradle.extension.TinkerBuildConfigExtension
-import com.tencent.tinker.build.gradle.extension.TinkerDexExtension
-import com.tencent.tinker.build.gradle.extension.TinkerLibExtension
-import com.tencent.tinker.build.gradle.extension.TinkerPackageConfigExtension
-import com.tencent.tinker.build.gradle.extension.TinkerPatchExtension
-import com.tencent.tinker.build.gradle.extension.TinkerResourceExtension
-import com.tencent.tinker.build.gradle.extension.TinkerSevenZipExtension
-import com.tencent.tinker.build.gradle.task.TinkerManifestTask
-import com.tencent.tinker.build.gradle.task.TinkerMultidexConfigTask
-import com.tencent.tinker.build.gradle.task.TinkerPatchSchemaTask
-import com.tencent.tinker.build.gradle.task.TinkerProguardConfigTask
-import com.tencent.tinker.build.gradle.task.TinkerResourceIdTask
+import com.tencent.tinker.build.gradle.extension.*
+import com.tencent.tinker.build.gradle.task.*
+import com.tencent.tinker.build.gradle.transform.AuxiliaryInjectTransform
 import com.tencent.tinker.build.util.FileOperation
 import com.tencent.tinker.build.util.TypedValue
 import org.gradle.api.GradleException
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.UnknownTaskException
 
 /**
  * Registers the plugin's tasks.
@@ -58,6 +50,8 @@ class TinkerPatchPlugin implements Plugin<Project> {
         project.tinkerPatch.extensions.create('sevenZip', TinkerSevenZipExtension, project)
 
         def configuration = project.tinkerPatch
+
+        project.android.registerTransform(new AuxiliaryInjectTransform(project))
 
         project.afterEvaluate {
             if (!project.plugins.hasPlugin('com.android.application')) {
@@ -105,10 +99,23 @@ class TinkerPatchPlugin implements Plugin<Project> {
                 def variantOutput = variant.outputs.first()
                 def variantName = variant.name.capitalize()
 
+                try {
+                    def instantRunTask = project.tasks.getByName("transformClassesWithInstantRunFor${variantName}")
+                    if (instantRunTask) {
+                        throw new GradleException(
+                                "Tinker does not support instant run mode, please trigger build"
+                                        + " by assemble${variantName} or disable instant run"
+                                        + " in 'File->Settings...'."
+                        )
+                    }
+                } catch (UnknownTaskException e) {
+                    // Not in instant run mode, continue.
+                }
+
                 TinkerPatchSchemaTask tinkerPatchBuildTask = project.tasks.create("tinkerPatch${variantName}", TinkerPatchSchemaTask)
                 tinkerPatchBuildTask.dependsOn variant.assemble
 
-                tinkerPatchBuildTask.signconfig = variant.apkVariantData.variantConfiguration.signingConfig
+                tinkerPatchBuildTask.signConfig = variant.apkVariantData.variantConfiguration.signingConfig
 
                 variant.outputs.each { output ->
                     tinkerPatchBuildTask.buildApkPath = output.outputFile
@@ -124,6 +131,14 @@ class TinkerPatchPlugin implements Plugin<Project> {
                 manifestTask.mustRunAfter variantOutput.processManifest
 
                 variantOutput.processResources.dependsOn manifestTask
+
+                //resource id
+                TinkerResourceIdTask applyResourceTask = project.tasks.create("tinkerProcess${variantName}ResourceId", TinkerResourceIdTask)
+                applyResourceTask.resDir = variantOutput.processResources.resDir
+                //let applyResourceTask run after manifestTask
+                applyResourceTask.mustRunAfter manifestTask
+
+                variantOutput.processResources.dependsOn applyResourceTask
 
                 // Add this proguard settings file to the list
                 boolean proguardEnable = variant.getBuildType().buildType.minifyEnabled
@@ -142,14 +157,7 @@ class TinkerPatchPlugin implements Plugin<Project> {
                     multidexConfigTask.applicationVariant = variant
                     variantOutput.packageApplication.dependsOn multidexConfigTask
                 }
-//                if (tempResourceFile != null && tempResourceFile.exists() && tempResourceFile.isFile()) {
-                    TinkerResourceIdTask applyResourceTask = project.tasks.create("tinkerProcess${variantName}ResourceId", TinkerResourceIdTask)
-                    applyResourceTask.resDir = variantOutput.processResources.resDir
-                    variantOutput.processResources.dependsOn applyResourceTask
-//                }
-//                else {
-//                    project.logger.error("apply resource mapping file ${resourceMappingFile} is not exist, just ignore")
-//                }
+
             }
         }
 
